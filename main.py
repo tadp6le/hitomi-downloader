@@ -26,6 +26,7 @@ async def fetch_gallery_metadata(gallery_id: str, session: AsyncSession):
         f"https://ltn.hitomi.la/galleries/{gallery_id}.js"
     ]
     
+    last_error = ""
     for url in domains_to_try:
         try:
             response = await session.get(url, timeout=10)
@@ -34,41 +35,59 @@ async def fetch_gallery_metadata(gallery_id: str, session: AsyncSession):
                 if text.endswith(';'):
                     text = text[:-1]
                 return json.loads(text)
-        except Exception:
+            else:
+                last_error = f"HTTP {response.status_code}"
+        except Exception as e:
+            last_error = str(e)
             continue
             
-    raise Exception("Failed to fetch metadata from all known Hitomi CDNs. The gallery might be deleted or DNS is blocked.")
+    raise Exception(f"Failed to fetch metadata. Last error: {last_error}")
 
 async def download_image_with_retry(session: AsyncSession, img_data: dict, index: int, ws: WebSocket) -> bytes:
-    """Brute-forces the image download by checking all possible Hitomi subdomains."""
+    """Brute-forces the image download with strict browser headers."""
     img_hash = img_data.get('hash')
     has_webp = img_data.get('haswebp', 0)
     
     ext = 'webp' if has_webp else img_data.get('name', '').split('.')[-1]
     folder = 'webp' if has_webp else 'images'
-    hash_part = img_hash[-1] + '/' + img_hash[-3:-1]
+    hash_part = f"{img_hash[-1]}/{img_hash[-3:-1]}"
     
-    # Hitomi rotates these. We brute force them to bypass the need for exact gg.js math.
+    # Expanded list of all known Hitomi subdomains
+    subdomains = ['a', 'b', 'c', 'aa', 'ba', 'ca', 'da']
     base_domains = ['hitomi.la', 'gold-usergeneratedcontent.net']
-    sub_prefixes = ['a', 'b', 'c']
+    
+    # Hitomi will instantly 403 block image requests that don't look like a real browser image fetch
+    headers = {
+        "Referer": "https://hitomi.la/",
+        "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+        "Sec-Fetch-Dest": "image",
+        "Sec-Fetch-Mode": "no-cors",
+        "Sec-Fetch-Site": "cross-site",
+    }
     
     for attempt in range(3):
+        last_error = "Unknown"
+        
         for domain in base_domains:
-            for sub in sub_prefixes:
-                url = f"https://{sub}a.{domain}/{folder}/{hash_part}/{img_hash}.{ext}"
+            for sub in subdomains:
+                url = f"https://{sub}.{domain}/{folder}/{hash_part}/{img_hash}.{ext}"
                 try:
-                    headers = {"Referer": f"https://{domain}/"}
                     resp = await session.get(url, headers=headers, timeout=10)
                     
                     if resp.status_code == 200:
                         return resp.content
-                except Exception:
-                    continue # Ignore network errors and try the next domain combo
+                    else:
+                        last_error = f"HTTP {resp.status_code}"
+                        
+                except Exception as e:
+                    # Capture exact timeout or DNS errors (like curl 6 or 28)
+                    last_error = str(e)
+                    continue
                     
-        await ws.send_json({"type": "log", "msg": f"⚠️ Attempt {attempt+1} failed for image {index}. Retrying network..."})
+        await ws.send_json({"type": "log", "msg": f"⚠️ Attempt {attempt+1} failed for image {index} | Reason: {last_error}"})
         await asyncio.sleep(2 ** attempt)
         
-    await ws.send_json({"type": "log", "msg": f"❌ Exhausted all routes for image {index}. Image skipped."})
+    await ws.send_json({"type": "log", "msg": f"❌ Exhausted all routes for image {index}."})
     return b""
 
 @app.get("/")
@@ -94,7 +113,7 @@ async def websocket_endpoint(websocket: WebSocket):
             
             async with AsyncSession(impersonate="chrome110") as session:
                 try:
-                    if action == "estimate" or action == "download":
+                    if action in ["estimate", "download"]:
                         await websocket.send_json({"type": "log", "msg": f"Fetching metadata for gallery {gallery_id}..."})
                         metadata = await fetch_gallery_metadata(gallery_id, session)
                         images = metadata.get('files', [])
@@ -119,6 +138,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         file_id = str(uuid.uuid4())
                         zip_path = TEMP_DIR / f"{gallery_id}_{file_id}.zip"
                         
+                        # Concurrency limit to prevent RAM crashes
                         semaphore = asyncio.Semaphore(4)
                         downloaded_count = 0
                         
@@ -148,9 +168,8 @@ async def websocket_endpoint(websocket: WebSocket):
                         ]
                         await asyncio.gather(*tasks)
                         
-                        # Failsafe: Prevent 404 redirect if completely failed
                         if downloaded_count == 0:
-                            await websocket.send_json({"type": "error", "msg": "Failed to download any images. The server blocks our IPs or routing failed."})
+                            await websocket.send_json({"type": "error", "msg": "Failed to download any images. Render's IP might be permanently blocked by Hitomi's Cloudflare."})
                         else:
                             await websocket.send_json({
                                 "type": "done",
