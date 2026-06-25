@@ -1,0 +1,203 @@
+```html
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hitomi Cloud Archiver</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        darkBg: '#0f172a',
+                        cardBg: '#1e293b'
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        /* Custom scrollbar for terminal */
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: #1e293b; }
+        ::-webkit-scrollbar-thumb { background: #475569; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #64748b; }
+    </style>
+</head>
+<body class="bg-darkBg text-gray-200 min-h-screen font-sans flex flex-col items-center py-10 px-4">
+
+    <div class="max-w-3xl w-full space-y-6">
+        <!-- Header -->
+        <div class="text-center space-y-2">
+            <h1 class="text-4xl font-bold text-white bg-clip-text text-transparent bg-gradient-to-r from-indigo-400 to-cyan-400">
+                Hitomi Cloud Archiver
+            </h1>
+            <p class="text-gray-400 text-sm">Bypass protections, optimize memory, and package directly to ZIP.</p>
+        </div>
+
+        <!-- Main Card -->
+        <div class="bg-cardBg p-6 rounded-xl shadow-2xl border border-gray-700 space-y-5">
+            
+            <!-- Input Row -->
+            <div class="space-y-2">
+                <label class="block text-sm font-medium text-gray-300">Gallery URL</label>
+                <input type="text" id="urlInput" placeholder="https://hitomi.la/imageset/english-3441601.html#1" 
+                    class="w-full bg-gray-800 border border-gray-600 rounded-lg px-4 py-3 text-white focus:outline-none focus:ring-2 focus:ring-indigo-500 transition">
+            </div>
+
+            <div class="grid grid-cols-2 gap-4">
+                <div class="space-y-2">
+                    <label class="block text-sm font-medium text-gray-300">Start Image</label>
+                    <input type="number" id="startInput" value="1" min="1"
+                        class="w-full bg-gray-800 border border-gray-600 rounded-lg px-4 py-2 text-white focus:outline-none focus:ring-2 focus:ring-indigo-500 transition">
+                </div>
+                <div class="space-y-2">
+                    <label class="block text-sm font-medium text-gray-300">End Image (Max)</label>
+                    <input type="number" id="endInput" value="100" min="1"
+                        class="w-full bg-gray-800 border border-gray-600 rounded-lg px-4 py-2 text-white focus:outline-none focus:ring-2 focus:ring-indigo-500 transition">
+                </div>
+            </div>
+
+            <!-- Actions -->
+            <div class="flex space-x-3 pt-2">
+                <button id="btnEstimate" onclick="sendAction('estimate')" 
+                    class="flex-1 bg-gray-700 hover:bg-gray-600 text-white py-3 rounded-lg font-semibold transition shadow-lg">
+                    Calculate Size
+                </button>
+                <button id="btnDownload" onclick="sendAction('download')" disabled
+                    class="flex-1 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed text-white py-3 rounded-lg font-semibold transition shadow-lg flex justify-center items-center">
+                    <svg id="dlSpinner" class="animate-spin -ml-1 mr-3 h-5 w-5 text-white hidden" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                    Start Download
+                </button>
+            </div>
+
+            <!-- Estimate Alert -->
+            <div id="estimateAlert" class="hidden bg-indigo-900/50 border border-indigo-500 text-indigo-200 px-4 py-3 rounded-lg text-sm">
+            </div>
+
+            <!-- Progress Bar -->
+            <div class="space-y-1">
+                <div class="flex justify-between text-xs text-gray-400">
+                    <span>Progress</span>
+                    <span id="progressText">0%</span>
+                </div>
+                <div class="w-full bg-gray-700 rounded-full h-2.5">
+                    <div id="progressBar" class="bg-gradient-to-r from-indigo-500 to-cyan-500 h-2.5 rounded-full" style="width: 0%"></div>
+                </div>
+            </div>
+
+        </div>
+
+        <!-- Terminal / Logs -->
+        <div class="bg-black/80 rounded-xl border border-gray-700 overflow-hidden shadow-2xl">
+            <div class="bg-gray-800 px-4 py-2 border-b border-gray-700 flex items-center space-x-2">
+                <div class="w-3 h-3 rounded-full bg-red-500"></div>
+                <div class="w-3 h-3 rounded-full bg-yellow-500"></div>
+                <div class="w-3 h-3 rounded-full bg-green-500"></div>
+                <span class="text-xs text-gray-400 ml-2 font-mono">system.log</span>
+            </div>
+            <div id="logContainer" class="p-4 h-64 overflow-y-auto font-mono text-sm text-green-400 space-y-1">
+                <div>> System initialized. Awaiting connection...</div>
+            </div>
+        </div>
+
+    </div>
+
+    <script>
+        let ws;
+        const logContainer = document.getElementById('logContainer');
+        const estimateAlert = document.getElementById('estimateAlert');
+        const progressBar = document.getElementById('progressBar');
+        const progressText = document.getElementById('progressText');
+        const btnDownload = document.getElementById('btnDownload');
+        const dlSpinner = document.getElementById('dlSpinner');
+
+        function appendLog(msg, colorClass = "text-green-400") {
+            const div = document.createElement('div');
+            const time = new Date().toLocaleTimeString('en-US', { hour12: false });
+            div.className = colorClass;
+            div.innerText = `[${time}] > ${msg}`;
+            logContainer.appendChild(div);
+            logContainer.scrollTop = logContainer.scrollHeight;
+        }
+
+        function connectWS() {
+            // Adjust protocol based on http/https
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
+            
+            ws.onopen = () => {
+                appendLog("WebSocket connection established.", "text-cyan-400");
+                btnDownload.disabled = false;
+            };
+
+            ws.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+
+                if (data.type === 'log') {
+                    appendLog(data.msg);
+                } else if (data.type === 'error') {
+                    appendLog("ERROR: " + data.msg, "text-red-400");
+                    btnDownload.disabled = false;
+                    dlSpinner.classList.add('hidden');
+                } else if (data.type === 'estimate') {
+                    estimateAlert.classList.remove('hidden');
+                    estimateAlert.innerText = data.msg;
+                    document.getElementById('endInput').value = data.total;
+                } else if (data.type === 'progress') {
+                    progressBar.style.width = `${data.progress}%`;
+                    progressText.innerText = `${Math.round(data.progress)}%`;
+                    appendLog(data.msg, "text-gray-400");
+                } else if (data.type === 'done') {
+                    appendLog(data.msg, "text-yellow-400");
+                    progressBar.style.width = `100%`;
+                    progressText.innerText = `100%`;
+                    btnDownload.disabled = false;
+                    dlSpinner.classList.add('hidden');
+                    
+                    // Trigger native file download
+                    window.location.href = data.download_url;
+                }
+            };
+
+            ws.onclose = () => {
+                appendLog("Connection lost. Reconnecting in 3s...", "text-red-500");
+                btnDownload.disabled = true;
+                setTimeout(connectWS, 3000);
+            };
+        }
+
+        function sendAction(action) {
+            const url = document.getElementById('urlInput').value;
+            if(!url) return alert("Please enter a URL");
+
+            if(action === 'download') {
+                btnDownload.disabled = true;
+                dlSpinner.classList.remove('hidden');
+                progressBar.style.width = '0%';
+                progressText.innerText = '0%';
+            }
+
+            ws.send(JSON.stringify({
+                action: action,
+                url: url,
+                start: document.getElementById('startInput').value,
+                end: document.getElementById('endInput').value
+            }));
+        }
+
+        // Initialize WebSockets on load
+        window.addEventListener('DOMContentLoaded', connectWS);
+    </script>
+</body>
+</html>
+
+```
+
+                  
